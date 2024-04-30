@@ -49,12 +49,17 @@
 struct aa_sk_ctx {
 	struct aa_label *label;
 	struct aa_label *peer;
+	struct path path;
 };
 
-#define SK_CTX(X) ((X)->sk_security)
+static inline bool aa_secmark(void)
+{
+	return apparmor_blob_sizes.lbs_secmark;
+}
+
 static inline struct aa_sk_ctx *aa_sock(const struct sock *sk)
 {
-	return sk->sk_security;
+	return sk->sk_security + apparmor_blob_sizes.lbs_sock;
 }
 
 #define DEFINE_AUDIT_NET(NAME, OP, SK, F, T, P)				  \
@@ -74,10 +79,29 @@ static inline struct aa_sk_ctx *aa_sock(const struct sock *sk)
 			 (SK)->sk_protocol)
 
 
+
+/* struct aa_net - network confinement data
+ * @allow: basic network families permissions
+ * @audit: which network permissions to force audit
+ * @quiet: which network permissions to quiet rejects
+ */
+struct aa_net_compat {
+	u16 allow[AF_MAX];
+	u16 audit[AF_MAX];
+	u16 quiet[AF_MAX];
+};
+
 #define af_select(FAMILY, FN, DEF_FN)		\
 ({						\
 	int __e;				\
 	switch ((FAMILY)) {			\
+	case PF_UNIX:				\
+		__e = aa_unix_ ## FN;		\
+		break;				\
+	case PF_INET:				\
+	case PF_INET6:				\
+		__e = aa_inet_ ## FN;		\
+		break;				\
 	default:				\
 		__e = DEF_FN;			\
 	}					\
@@ -92,6 +116,7 @@ struct aa_secmark {
 };
 
 extern struct aa_sfs_entry aa_sfs_entry_network[];
+extern struct aa_sfs_entry aa_sfs_entry_network_compat[];
 
 void audit_net_cb(struct audit_buffer *ab, void *va);
 int aa_profile_af_perm(struct aa_profile *profile,

@@ -61,6 +61,9 @@ bool last_level_cache_is_valid(unsigned int cpu)
 	if (!cache_leaves(cpu))
 		return false;
 
+	if (!per_cpu_cacheinfo(cpu))
+		return false;
+
 	llc = per_cpu_cacheinfo_idx(cpu, cache_leaves(cpu) - 1);
 
 	return (llc->attributes & CACHE_ID) || !!llc->fw_token;
@@ -554,7 +557,11 @@ static inline int init_level_allocate_ci(unsigned int cpu)
 	 */
 	ci_cacheinfo(cpu)->early_ci_levels = false;
 
-	if (cache_leaves(cpu) <= early_leaves)
+	/*
+	 * Some architectures (e.g., x86) do not use early initialization.
+	 * Allocate memory now in such case.
+	 */
+	if (cache_leaves(cpu) <= early_leaves && per_cpu_cacheinfo(cpu))
 		return 0;
 
 	kfree(per_cpu_cacheinfo(cpu));

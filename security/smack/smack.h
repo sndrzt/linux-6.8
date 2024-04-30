@@ -355,6 +355,23 @@ static inline struct superblock_smack *smack_superblock(
 	return superblock->s_security + smack_blob_sizes.lbs_superblock;
 }
 
+static inline struct socket_smack *smack_sock(const struct sock *sock)
+{
+	return sock->sk_security + smack_blob_sizes.lbs_sock;
+}
+
+#ifdef CONFIG_KEYS
+static inline struct smack_known **smack_key(const struct key *key)
+{
+	return key->security + smack_blob_sizes.lbs_key;
+}
+#endif /* CONFIG_KEYS */
+
+static inline bool smack_netlabel(void)
+{
+	return smack_blob_sizes.lbs_netlabel;
+}
+
 /*
  * Is the directory transmuting?
  */
@@ -362,6 +379,11 @@ static inline int smk_inode_transmutable(const struct inode *isp)
 {
 	struct inode_smack *sip = smack_inode(isp);
 	return (sip->smk_flags & SMK_INODE_TRANSMUTE) != 0;
+}
+
+static inline bool smack_secmark(void)
+{
+	return smack_blob_sizes.lbs_secmark;
 }
 
 /*

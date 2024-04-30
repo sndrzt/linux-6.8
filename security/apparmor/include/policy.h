@@ -34,7 +34,11 @@
 struct aa_ns;
 
 extern int unprivileged_userns_apparmor_policy;
+extern int aa_unprivileged_userns_restricted;
+extern int aa_unprivileged_userns_restricted_force;
+extern int aa_unprivileged_userns_restricted_complain;
 extern int aa_unprivileged_unconfined_restricted;
+extern int aa_unprivileged_uring_restricted;
 
 extern const char *const aa_profile_mode_names[];
 #define APPARMOR_MODE_NAMES_MAX_INDEX 4
@@ -58,6 +62,11 @@ extern const char *const aa_profile_mode_names[];
 #define profile_is_stale(_profile) (label_is_stale(&(_profile)->label))
 
 #define on_list_rcu(X) (!list_empty(X) && (X)->prev != LIST_POISON2)
+
+/* flags in the dfa accept2 table */
+enum dfa_accept_flags {
+	ACCEPT_FLAG_OWNER = 1,
+};
 
 /*
  * FIXME: currently need a clean way to replace and remove profiles as a
@@ -124,6 +133,7 @@ static inline void aa_put_pdb(struct aa_policydb *pdb)
 		kref_put(&pdb->count, aa_pdb_free_kref);
 }
 
+/* lookup perm that doesn't have and object conditional */
 static inline struct aa_perms *aa_lookup_perms(struct aa_policydb *policy,
 					       aa_state_t state)
 {
@@ -134,7 +144,6 @@ static inline struct aa_perms *aa_lookup_perms(struct aa_policydb *policy,
 
 	return &(policy->perms[index]);
 }
-
 
 /* struct aa_data - generic data structure
  * key: name for retrieving this data
@@ -175,6 +184,10 @@ struct aa_ruleset {
 	struct aa_secmark *secmark;
 };
 
+void aa_free_ruleset(struct aa_ruleset *rules);
+struct aa_ruleset *aa_new_ruleset(gfp_t gfp);
+struct aa_ruleset *aa_clone_ruleset(struct aa_ruleset *rules);
+
 /* struct aa_attachment - data and rules for a profiles attachment
  * @list:
  * @xmatch_str: human readable attachment string
@@ -204,6 +217,7 @@ struct aa_attachment {
  * @disconnected: what to prepend if attach_disconnected is specified
  * @attach: attachment rules for the profile
  * @rules: rules to be enforced
+ * @net_compat: v2 compat network controls for the profile
  *
  * @dents: dentries for the profiles file entries in apparmorfs
  * @dirname: name of the profile dir in apparmorfs
@@ -231,10 +245,14 @@ struct aa_profile {
 	enum audit_mode audit;
 	long mode;
 	u32 path_flags;
+	int signal;
 	const char *disconnected;
 
 	struct aa_attachment attach;
 	struct list_head rules;
+	struct aa_net_compat *net_compat;
+
+	struct aa_audit_cache learning_cache;
 
 	struct aa_loaddata *rawdata;
 	unsigned char *hash;
@@ -304,8 +322,11 @@ static inline aa_state_t RULE_MEDIATES_AF(struct aa_ruleset *rules, u16 AF)
 	aa_state_t state = RULE_MEDIATES(rules, AA_CLASS_NET);
 	__be16 be_af = cpu_to_be16(AF);
 
-	if (!state)
-		return DFA_NOMATCH;
+	if (!state) {
+		state = RULE_MEDIATES(rules, AA_CLASS_NET_COMPAT);
+		if (!state)
+			return DFA_NOMATCH;
+	}
 	return aa_dfa_match_len(rules->policy->dfa, state, (char *) &be_af, 2);
 }
 
@@ -317,6 +338,19 @@ static inline aa_state_t ANY_RULE_MEDIATES(struct list_head *head,
 	/* TODO: change to list walk */
 	rule = list_first_entry(head, typeof(*rule), list);
 	return RULE_MEDIATES(rule, class);
+}
+
+void aa_compute_profile_mediates(struct aa_profile *profile);
+static inline bool profile_mediates(struct aa_profile *profile,
+				    unsigned char class)
+{
+	return label_mediates(&profile->label, class);
+}
+
+static inline bool profile_mediates_safe(struct aa_profile *profile,
+					 unsigned char class)
+{
+	return label_mediates_safe(&profile->label, class);
 }
 
 /**

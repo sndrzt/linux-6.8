@@ -31,6 +31,7 @@
 #include <linux/msg.h>
 #include <linux/overflow.h>
 #include <net/flow.h>
+#include <net/sock.h>
 
 /* How many LSMs were built into the kernel? */
 #define LSM_COUNT (__end_lsm_info - __start_lsm_info)
@@ -226,11 +227,28 @@ static void __init lsm_set_blob_sizes(struct lsm_blob_sizes *needed)
 		blob_sizes.lbs_inode = sizeof(struct rcu_head);
 	lsm_set_blob_size(&needed->lbs_inode, &blob_sizes.lbs_inode);
 	lsm_set_blob_size(&needed->lbs_ipc, &blob_sizes.lbs_ipc);
+#ifdef CONFIG_KEYS
+	lsm_set_blob_size(&needed->lbs_key, &blob_sizes.lbs_key);
+#endif
 	lsm_set_blob_size(&needed->lbs_msg_msg, &blob_sizes.lbs_msg_msg);
+	lsm_set_blob_size(&needed->lbs_sock, &blob_sizes.lbs_sock);
 	lsm_set_blob_size(&needed->lbs_superblock, &blob_sizes.lbs_superblock);
 	lsm_set_blob_size(&needed->lbs_task, &blob_sizes.lbs_task);
 	lsm_set_blob_size(&needed->lbs_xattr_count,
 			  &blob_sizes.lbs_xattr_count);
+	lsm_set_blob_size(&needed->lbs_mnt_opts, &blob_sizes.lbs_mnt_opts);
+	if (needed->lbs_secmark) {
+		if (!blob_sizes.lbs_secmark)
+			blob_sizes.lbs_secmark = true;
+		else
+			needed->lbs_secmark = false;
+	}
+	if (needed->lbs_netlabel) {
+		if (!blob_sizes.lbs_netlabel)
+			blob_sizes.lbs_netlabel = true;
+		else
+			needed->lbs_netlabel = false;
+	}
 }
 
 /* Prepare LSM for initialization. */
@@ -268,7 +286,48 @@ static void __init initialize_lsm(struct lsm_info *lsm)
  * Current index to use while initializing the lsm id list.
  */
 u32 lsm_active_cnt __ro_after_init;
+u32 lsm_blob_cnt __ro_after_init;
 const struct lsm_id *lsm_idlist[LSM_CONFIG_COUNT];
+
+/**
+ * lsm_name_to_id - get the LSM ID for a registered LSM
+ * @name: the name of the LSM
+ *
+ * Returns the LSM ID associated with the named LSM or
+ * LSM_ID_UNDEF if the name isn't recongnized.
+ */
+u64 lsm_name_to_id(const char *name)
+{
+	int i;
+
+	for (i = 0; i < LSM_CONFIG_COUNT; i++) {
+		if (!lsm_idlist[i]->name)
+			return LSM_ID_UNDEF;
+		if (!strcmp(name, lsm_idlist[i]->name))
+			return lsm_idlist[i]->id;
+	}
+	return LSM_ID_UNDEF;
+}
+
+/**
+ * lsm_id_to_name - get the LSM name for a registered LSM ID
+ * @id: the ID of the LSM
+ *
+ * Returns the LSM name associated with the LSM ID or
+ * NULL if the ID isn't recongnized.
+ */
+const char *lsm_id_to_name(u64 id)
+{
+	int i;
+
+	for (i = 0; i < LSM_CONFIG_COUNT; i++) {
+		if (!lsm_idlist[i]->name)
+			return NULL;
+		if (id == lsm_idlist[i]->id)
+			return lsm_idlist[i]->name;
+	}
+	return NULL;
+}
 
 /* Populate ordered LSMs list from comma-separated LSM name list. */
 static void __init ordered_lsm_parse(const char *order, const char *origin)
@@ -400,10 +459,15 @@ static void __init ordered_lsm_init(void)
 	init_debug("file blob size       = %d\n", blob_sizes.lbs_file);
 	init_debug("inode blob size      = %d\n", blob_sizes.lbs_inode);
 	init_debug("ipc blob size        = %d\n", blob_sizes.lbs_ipc);
+#ifdef CONFIG_KEYS
+	init_debug("key blob size        = %d\n", blob_sizes.lbs_key);
+#endif /* CONFIG_KEYS */
 	init_debug("msg_msg blob size    = %d\n", blob_sizes.lbs_msg_msg);
+	init_debug("sock blob size       = %d\n", blob_sizes.lbs_sock);
 	init_debug("superblock blob size = %d\n", blob_sizes.lbs_superblock);
 	init_debug("task blob size       = %d\n", blob_sizes.lbs_task);
 	init_debug("xattr slots          = %d\n", blob_sizes.lbs_xattr_count);
+	init_debug("mnt_opts blob size   = %d\n", blob_sizes.lbs_mnt_opts);
 
 	/*
 	 * Create any kmem_caches needed for blobs
@@ -557,6 +621,8 @@ void __init security_add_hooks(struct security_hook_list *hooks, int count,
 		if (lsm_active_cnt >= LSM_CONFIG_COUNT)
 			panic("%s Too many LSMs registered.\n", __func__);
 		lsm_idlist[lsm_active_cnt++] = lsmid;
+		if (lsmid->lsmblob)
+			lsm_blob_cnt++;
 	}
 
 	for (i = 0; i < count; i++) {
@@ -714,6 +780,29 @@ static int lsm_ipc_alloc(struct kern_ipc_perm *kip)
 		return -ENOMEM;
 	return 0;
 }
+
+#ifdef CONFIG_KEYS
+/**
+ * lsm_key_alloc - allocate a composite key blob
+ * @key: the key that needs a blob
+ *
+ * Allocate the key blob for all the modules
+ *
+ * Returns 0, or -ENOMEM if memory can't be allocated.
+ */
+int lsm_key_alloc(struct key *key)
+{
+	if (blob_sizes.lbs_key == 0) {
+		key->security = NULL;
+		return 0;
+	}
+
+	key->security = kzalloc(blob_sizes.lbs_key, GFP_KERNEL);
+	if (key->security == NULL)
+		return -ENOMEM;
+	return 0;
+}
+#endif /* CONFIG_KEYS */
 
 /**
  * lsm_msg_msg_alloc - allocate a composite msg_msg blob
@@ -884,6 +973,7 @@ int security_binder_set_context_mgr(const struct cred *mgr)
 {
 	return call_int_hook(binder_set_context_mgr, 0, mgr);
 }
+EXPORT_SYMBOL(security_binder_set_context_mgr);
 
 /**
  * security_binder_transaction() - Check if a binder transaction is allowed
@@ -899,6 +989,7 @@ int security_binder_transaction(const struct cred *from,
 {
 	return call_int_hook(binder_transaction, 0, from, to);
 }
+EXPORT_SYMBOL(security_binder_transaction);
 
 /**
  * security_binder_transfer_binder() - Check if a binder transfer is allowed
@@ -914,6 +1005,7 @@ int security_binder_transfer_binder(const struct cred *from,
 {
 	return call_int_hook(binder_transfer_binder, 0, from, to);
 }
+EXPORT_SYMBOL(security_binder_transfer_binder);
 
 /**
  * security_binder_transfer_file() - Check if a binder file xfer is allowed
@@ -930,6 +1022,7 @@ int security_binder_transfer_file(const struct cred *from,
 {
 	return call_int_hook(binder_transfer_file, 0, from, to, file);
 }
+EXPORT_SYMBOL(security_binder_transfer_file);
 
 /**
  * security_ptrace_access_check() - Check if tracing is allowed
@@ -1270,18 +1363,15 @@ int security_fs_context_parse_param(struct fs_context *fc,
 				    struct fs_parameter *param)
 {
 	struct security_hook_list *hp;
-	int trc;
-	int rc = -ENOPARAM;
+	int rc;
 
 	hlist_for_each_entry(hp, &security_hook_heads.fs_context_parse_param,
 			     list) {
-		trc = hp->hook.fs_context_parse_param(fc, param);
-		if (trc == 0)
-			rc = 0;
-		else if (trc != -ENOPARAM)
-			return trc;
+		rc = hp->hook.fs_context_parse_param(fc, param);
+		if (rc != -ENOPARAM)
+			return rc;
 	}
-	return rc;
+	return -ENOPARAM;
 }
 
 /**
@@ -1333,6 +1423,18 @@ void security_sb_free(struct super_block *sb)
 }
 
 /**
+ * lsm_mnt_opts_alloc - allocate a mnt_opts blob
+ * @priority: memory allocation priority
+ *
+ * Returns a newly allocated mnt_opts blob or NULL if
+ * memory isn't available.
+ */
+void *lsm_mnt_opts_alloc(gfp_t priority)
+{
+	return kzalloc(blob_sizes.lbs_mnt_opts, priority);
+}
+
+/**
  * security_free_mnt_opts() - Free memory associated with mount options
  * @mnt_opts: LSM processed mount options
  *
@@ -1343,6 +1445,7 @@ void security_free_mnt_opts(void **mnt_opts)
 	if (!*mnt_opts)
 		return;
 	call_void_hook(sb_free_mnt_opts, *mnt_opts);
+	kfree(*mnt_opts);
 	*mnt_opts = NULL;
 }
 EXPORT_SYMBOL(security_free_mnt_opts);
@@ -1624,8 +1727,7 @@ void security_inode_free(struct inode *inode)
  * @mode: mode used to determine resource type
  * @name: name of the last path component
  * @xattr_name: name of the security/LSM xattr
- * @ctx: pointer to the resulting LSM context
- * @ctxlen: length of @ctx
+ * @lsmctx: pointer to the resulting LSM context
  *
  * Compute a context for a dentry as the inode is not yet available since NFSv4
  * has no label backed by an EA anyway.  It is important to note that
@@ -1635,8 +1737,8 @@ void security_inode_free(struct inode *inode)
  */
 int security_dentry_init_security(struct dentry *dentry, int mode,
 				  const struct qstr *name,
-				  const char **xattr_name, void **ctx,
-				  u32 *ctxlen)
+				  const char **xattr_name,
+				  struct lsmcontext *lsmctx)
 {
 	struct security_hook_list *hp;
 	int rc;
@@ -1647,7 +1749,7 @@ int security_dentry_init_security(struct dentry *dentry, int mode,
 	hlist_for_each_entry(hp, &security_hook_heads.dentry_init_security,
 			     list) {
 		rc = hp->hook.dentry_init_security(dentry, mode, name,
-						   xattr_name, ctx, ctxlen);
+						   xattr_name, lsmctx);
 		if (rc != LSM_RET_DEFAULT(dentry_init_security))
 			return rc;
 	}
@@ -2255,24 +2357,25 @@ int security_inode_setxattr(struct mnt_idmap *idmap,
 			    struct dentry *dentry, const char *name,
 			    const void *value, size_t size, int flags)
 {
-	int ret;
+	struct security_hook_list *hp;
+	int rc = -ENOSYS;
 
 	if (unlikely(IS_PRIVATE(d_backing_inode(dentry))))
 		return 0;
-	/*
-	 * SELinux and Smack integrate the cap call,
-	 * so assume that all LSMs supplying this call do so.
-	 */
-	ret = call_int_hook(inode_setxattr, 1, idmap, dentry, name, value,
-			    size, flags);
 
-	if (ret == 1)
-		ret = cap_inode_setxattr(dentry, name, value, size, flags);
-	if (ret)
-		return ret;
-	ret = ima_inode_setxattr(dentry, name, value, size);
-	if (ret)
-		return ret;
+	hlist_for_each_entry(hp, &security_hook_heads.inode_setxattr, list) {
+		rc = hp->hook.inode_setxattr(idmap, dentry, name, value, size,
+					     flags);
+		if (rc != -ENOSYS)
+			break;
+	}
+	if (rc == -ENOSYS)
+		rc = cap_inode_setxattr(dentry, name, value, size, flags);
+	if (rc)
+		return rc;
+	rc = ima_inode_setxattr(dentry, name, value, size);
+	if (rc)
+		return rc;
 	return evm_inode_setxattr(idmap, dentry, name, value, size);
 }
 
@@ -2565,16 +2668,15 @@ int security_inode_listsecurity(struct inode *inode,
 EXPORT_SYMBOL(security_inode_listsecurity);
 
 /**
- * security_inode_getsecid() - Get an inode's secid
+ * security_inode_getlsmblob() - Get an inode's LSM data
  * @inode: inode
- * @secid: secid to return
+ * @blob: lsm specific information to return
  *
- * Get the secid associated with the node.  In case of failure, @secid will be
- * set to zero.
+ * Get the lsm specific information associated with the node.
  */
-void security_inode_getsecid(struct inode *inode, u32 *secid)
+void security_inode_getlsmblob(struct inode *inode, struct lsmblob *blob)
 {
-	call_void_hook(inode_getsecid, inode, secid);
+	call_void_hook(inode_getlsmblob, inode, blob);
 }
 
 /**
@@ -3072,15 +3174,37 @@ void security_transfer_creds(struct cred *new, const struct cred *old)
  * @c: credentials
  * @secid: secid value
  *
- * Retrieve the security identifier of the cred structure @c.  In case of
- * failure, @secid will be set to zero.
+ * Retrieve the first available security identifier of the
+ * cred structure @c.  In case of failure, @secid will be set to zero.
+ * Currently only used by binder.
  */
 void security_cred_getsecid(const struct cred *c, u32 *secid)
 {
+	struct security_hook_list *hp;
+
+	hlist_for_each_entry(hp, &security_hook_heads.cred_getsecid, list) {
+		hp->hook.cred_getsecid(c, secid);
+		return;
+	}
+
 	*secid = 0;
-	call_void_hook(cred_getsecid, c, secid);
 }
 EXPORT_SYMBOL(security_cred_getsecid);
+
+/**
+ * security_cred_getlsmblob() - Get the LSM data from a set of credentials
+ * @c: credentials
+ * @blob: destination for the LSM data
+ *
+ * Retrieve the security data of the cred structure @c.  In case of
+ * failure, @blob will be cleared.
+ */
+void security_cred_getlsmblob(const struct cred *c, struct lsmblob *blob)
+{
+	lsmblob_init(blob);
+	call_void_hook(cred_getlsmblob, c, blob);
+}
+EXPORT_SYMBOL(security_cred_getlsmblob);
 
 /**
  * security_kernel_act_as() - Set the kernel credentials to act as secid
@@ -3327,33 +3451,33 @@ int security_task_getsid(struct task_struct *p)
 }
 
 /**
- * security_current_getsecid_subj() - Get the current task's subjective secid
- * @secid: secid value
+ * security_current_getlsmblob_subj() - Current task's subjective LSM data
+ * @blob: lsm specific information
  *
  * Retrieve the subjective security identifier of the current task and return
- * it in @secid.  In case of failure, @secid will be set to zero.
+ * it in @blob.
  */
-void security_current_getsecid_subj(u32 *secid)
+void security_current_getlsmblob_subj(struct lsmblob *blob)
 {
-	*secid = 0;
-	call_void_hook(current_getsecid_subj, secid);
+	lsmblob_init(blob);
+	call_void_hook(current_getlsmblob_subj, blob);
 }
-EXPORT_SYMBOL(security_current_getsecid_subj);
+EXPORT_SYMBOL(security_current_getlsmblob_subj);
 
 /**
- * security_task_getsecid_obj() - Get a task's objective secid
+ * security_task_getlsmblob_obj() - Get a task's objective LSM data
  * @p: target task
- * @secid: secid value
+ * @blob: lsm specific information
  *
  * Retrieve the objective security identifier of the task_struct in @p and
- * return it in @secid. In case of failure, @secid will be set to zero.
+ * return it in @blob.
  */
-void security_task_getsecid_obj(struct task_struct *p, u32 *secid)
+void security_task_getlsmblob_obj(struct task_struct *p, struct lsmblob *blob)
 {
-	*secid = 0;
-	call_void_hook(task_getsecid_obj, p, secid);
+	lsmblob_init(blob);
+	call_void_hook(task_getlsmblob_obj, p, blob);
 }
-EXPORT_SYMBOL(security_task_getsecid_obj);
+EXPORT_SYMBOL(security_task_getlsmblob_obj);
 
 /**
  * security_task_setnice() - Check if setting a task's nice value is allowed
@@ -3565,17 +3689,17 @@ int security_ipc_permission(struct kern_ipc_perm *ipcp, short flag)
 }
 
 /**
- * security_ipc_getsecid() - Get the sysv ipc object's secid
+ * security_ipc_getlsmblob() - Get the sysv ipc object LSM data
  * @ipcp: ipc permission structure
- * @secid: secid pointer
+ * @blob: pointer to lsm information
  *
- * Get the secid associated with the ipc object.  In case of failure, @secid
- * will be set to zero.
+ * Get the lsm information associated with the ipc object.
  */
-void security_ipc_getsecid(struct kern_ipc_perm *ipcp, u32 *secid)
+
+void security_ipc_getlsmblob(struct kern_ipc_perm *ipcp, struct lsmblob *blob)
 {
-	*secid = 0;
-	call_void_hook(ipc_getsecid, ipcp, secid);
+	lsmblob_init(blob);
+	call_void_hook(ipc_getlsmblob, ipcp, blob);
 }
 
 /**
@@ -4063,11 +4187,10 @@ int security_getprocattr(struct task_struct *p, int lsmid, const char *name,
 {
 	struct security_hook_list *hp;
 
-	hlist_for_each_entry(hp, &security_hook_heads.getprocattr, list) {
-		if (lsmid != 0 && lsmid != hp->lsmid->id)
-			continue;
-		return hp->hook.getprocattr(p, name, value);
-	}
+	hlist_for_each_entry(hp, &security_hook_heads.getprocattr, list)
+		if (lsmid == LSM_ID_UNDEF || lsmid == hp->lsmid->id)
+			return hp->hook.getprocattr(p, name, value);
+
 	return LSM_RET_DEFAULT(getprocattr);
 }
 
@@ -4130,17 +4253,16 @@ EXPORT_SYMBOL(security_ismaclabel);
 /**
  * security_secid_to_secctx() - Convert a secid to a secctx
  * @secid: secid
- * @secdata: secctx
- * @seclen: secctx length
+ * @cp: the LSM context
  *
- * Convert secid to security context.  If @secdata is NULL the length of the
- * result will be returned in @seclen, but no @secdata will be returned.  This
+ * Convert secid to security context.  If @cp is NULL the length of the
+ * result will be returned, but no data will be returned.  This
  * does mean that the length could change between calls to check the length and
- * the next call which actually allocates and returns the @secdata.
+ * the next call which actually allocates and returns the data.
  *
- * Return: Return 0 on success, error on failure.
+ * Return: Return length of data on success, error on failure.
  */
-int security_secid_to_secctx(u32 secid, char **secdata, u32 *seclen)
+int security_secid_to_secctx(u32 secid, struct lsmcontext *cp)
 {
 	struct security_hook_list *hp;
 	int rc;
@@ -4150,7 +4272,7 @@ int security_secid_to_secctx(u32 secid, char **secdata, u32 *seclen)
 	 * LSM hook is not "stackable").
 	 */
 	hlist_for_each_entry(hp, &security_hook_heads.secid_to_secctx, list) {
-		rc = hp->hook.secid_to_secctx(secid, secdata, seclen);
+		rc = hp->hook.secid_to_secctx(secid, cp);
 		if (rc != LSM_RET_DEFAULT(secid_to_secctx))
 			return rc;
 	}
@@ -4158,6 +4280,35 @@ int security_secid_to_secctx(u32 secid, char **secdata, u32 *seclen)
 	return LSM_RET_DEFAULT(secid_to_secctx);
 }
 EXPORT_SYMBOL(security_secid_to_secctx);
+
+/**
+ * security_lsmblob_to_secctx() - Convert a lsmblob to a secctx
+ * @blob: lsm specific information
+ * @cp: the LSM context
+ * @lsmid: which security module to report
+ *
+ * Convert a @blob entry to security context. If @cp is NULL the
+ * length of the result will be returned, but no data will be returned.
+ * This does mean that the length could change between calls to check
+ * the length and the next call which actually allocates and returns
+ * the data.
+ *
+ * Return: Return length of data on success, error on failure.
+ */
+int security_lsmblob_to_secctx(struct lsmblob *blob, struct lsmcontext *cp,
+			       int lsmid)
+{
+	struct security_hook_list *hp;
+
+	hlist_for_each_entry(hp, &security_hook_heads.lsmblob_to_secctx, list) {
+		if (lsmid != hp->lsmid->id && lsmid != LSM_ID_UNDEF)
+			continue;
+		return hp->hook.lsmblob_to_secctx(blob, cp);
+	}
+
+	return LSM_RET_DEFAULT(lsmblob_to_secctx);
+}
+EXPORT_SYMBOL(security_lsmblob_to_secctx);
 
 /**
  * security_secctx_to_secid() - Convert a secctx to a secid
@@ -4171,21 +4322,26 @@ EXPORT_SYMBOL(security_secid_to_secctx);
  */
 int security_secctx_to_secid(const char *secdata, u32 seclen, u32 *secid)
 {
+	struct security_hook_list *hp;
+
 	*secid = 0;
-	return call_int_hook(secctx_to_secid, 0, secdata, seclen, secid);
+	hlist_for_each_entry(hp, &security_hook_heads.secctx_to_secid, list)
+		return hp->hook.secctx_to_secid(secdata, seclen, secid);
+
+	return LSM_RET_DEFAULT(secctx_to_secid);
 }
 EXPORT_SYMBOL(security_secctx_to_secid);
 
 /**
  * security_release_secctx() - Free a secctx buffer
- * @secdata: secctx
- * @seclen: length of secctx
+ * @cp: the security context
  *
  * Release the security context.
  */
-void security_release_secctx(char *secdata, u32 seclen)
+void security_release_secctx(struct lsmcontext *cp)
 {
-	call_void_hook(release_secctx, secdata, seclen);
+	call_void_hook(release_secctx, cp);
+	memset(cp, 0, sizeof(*cp));
 }
 EXPORT_SYMBOL(security_release_secctx);
 
@@ -4248,24 +4404,24 @@ EXPORT_SYMBOL(security_inode_setsecctx);
 /**
  * security_inode_getsecctx() - Get the security label of an inode
  * @inode: inode
- * @ctx: secctx
- * @ctxlen: length of secctx
+ * @cp: security context
  *
- * On success, returns 0 and fills out @ctx and @ctxlen with the security
- * context for the given @inode.
+ * On success, returns 0 and fills out @cp with the security context
+ * for the given @inode.
  *
  * Return: Returns 0 on success, error on failure.
  */
-int security_inode_getsecctx(struct inode *inode, void **ctx, u32 *ctxlen)
+int security_inode_getsecctx(struct inode *inode, struct lsmcontext *cp)
 {
 	struct security_hook_list *hp;
 	int rc;
 
+	memset(cp, 0, sizeof(*cp));
 	/*
 	 * Only one module will provide a security context.
 	 */
 	hlist_for_each_entry(hp, &security_hook_heads.inode_getsecctx, list) {
-		rc = hp->hook.inode_getsecctx(inode, ctx, ctxlen);
+		rc = hp->hook.inode_getsecctx(inode, cp);
 		if (rc != LSM_RET_DEFAULT(inode_getsecctx))
 			return rc;
 	}
@@ -4677,6 +4833,28 @@ int security_socket_getpeersec_dgram(struct socket *sock,
 EXPORT_SYMBOL(security_socket_getpeersec_dgram);
 
 /**
+ * lsm_sock_alloc - allocate a composite sock blob
+ * @sock: the sock that needs a blob
+ * @priority: allocation mode
+ *
+ * Allocate the sock blob for all the modules
+ *
+ * Returns 0, or -ENOMEM if memory can't be allocated.
+ */
+static int lsm_sock_alloc(struct sock *sock, gfp_t priority)
+{
+	if (blob_sizes.lbs_sock == 0) {
+		sock->sk_security = NULL;
+		return 0;
+	}
+
+	sock->sk_security = kzalloc(blob_sizes.lbs_sock, priority);
+	if (sock->sk_security == NULL)
+		return -ENOMEM;
+	return 0;
+}
+
+/**
  * security_sk_alloc() - Allocate and initialize a sock's LSM blob
  * @sk: sock
  * @family: protocol family
@@ -4689,7 +4867,14 @@ EXPORT_SYMBOL(security_socket_getpeersec_dgram);
  */
 int security_sk_alloc(struct sock *sk, int family, gfp_t priority)
 {
-	return call_int_hook(sk_alloc_security, 0, sk, family, priority);
+	int rc = lsm_sock_alloc(sk, priority);
+
+	if (unlikely(rc))
+		return rc;
+	rc = call_int_hook(sk_alloc_security, 0, sk, family, priority);
+	if (unlikely(rc))
+		security_sk_free(sk);
+	return rc;
 }
 
 /**
@@ -4701,6 +4886,8 @@ int security_sk_alloc(struct sock *sk, int family, gfp_t priority)
 void security_sk_free(struct sock *sk)
 {
 	call_void_hook(sk_free_security, sk);
+	kfree(sk->sk_security);
+	sk->sk_security = NULL;
 }
 
 /**
@@ -5287,7 +5474,14 @@ EXPORT_SYMBOL(security_skb_classify_flow);
 int security_key_alloc(struct key *key, const struct cred *cred,
 		       unsigned long flags)
 {
-	return call_int_hook(key_alloc, 0, key, cred, flags);
+	int rc = lsm_key_alloc(key);
+
+	if (unlikely(rc))
+		return rc;
+	rc = call_int_hook(key_alloc, 0, key, cred, flags);
+	if (unlikely(rc))
+		security_key_free(key);
+	return rc;
 }
 
 /**
@@ -5298,7 +5492,8 @@ int security_key_alloc(struct key *key, const struct cred *cred,
  */
 void security_key_free(struct key *key)
 {
-	call_void_hook(key_free, key);
+	kfree(key->security);
+	key->security = NULL;
 }
 
 /**
@@ -5352,7 +5547,8 @@ int security_key_getsecurity(struct key *key, char **buffer)
  */
 int security_audit_rule_init(u32 field, u32 op, char *rulestr, void **lsmrule)
 {
-	return call_int_hook(audit_rule_init, 0, field, op, rulestr, lsmrule);
+	return call_int_hook(audit_rule_init, 0, field, op, rulestr, lsmrule,
+			     LSM_ID_UNDEF);
 }
 
 /**
@@ -5378,12 +5574,12 @@ int security_audit_rule_known(struct audit_krule *krule)
  */
 void security_audit_rule_free(void *lsmrule)
 {
-	call_void_hook(audit_rule_free, lsmrule);
+	call_void_hook(audit_rule_free, lsmrule, LSM_ID_UNDEF);
 }
 
 /**
  * security_audit_rule_match() - Check if a label matches an audit rule
- * @secid: security label
+ * @lsmblob: security label
  * @field: LSM audit field
  * @op: matching operator
  * @lsmrule: audit rule
@@ -5394,11 +5590,37 @@ void security_audit_rule_free(void *lsmrule)
  * Return: Returns 1 if secid matches the rule, 0 if it does not, -ERRNO on
  *         failure.
  */
-int security_audit_rule_match(u32 secid, u32 field, u32 op, void *lsmrule)
+int security_audit_rule_match(struct lsmblob *blob, u32 field, u32 op, void *lsmrule)
 {
-	return call_int_hook(audit_rule_match, 0, secid, field, op, lsmrule);
+	return call_int_hook(audit_rule_match, 0, blob, field, op, lsmrule,
+			     LSM_ID_UNDEF);
 }
 #endif /* CONFIG_AUDIT */
+
+#ifdef CONFIG_IMA_LSM_RULES
+/*
+ * The integrity subsystem uses the same hooks as
+ * the audit subsystem.
+ */
+int ima_filter_rule_init(u32 field, u32 op, char *rulestr, void **lsmrule,
+			 int lsmid)
+{
+	return call_int_hook(audit_rule_init, 0, field, op, rulestr, lsmrule,
+			     lsmid);
+}
+
+void ima_filter_rule_free(void *lsmrule, int lsmid)
+{
+	call_void_hook(audit_rule_free, lsmrule, lsmid);
+}
+
+int ima_filter_rule_match(struct lsmblob *blob, u32 field, u32 op,
+			  void *lsmrule, int lsmid)
+{
+	return call_int_hook(audit_rule_match, 0, blob, field, op, lsmrule,
+			     lsmid);
+}
+#endif /* CONFIG_IMA_LSM_RULES */
 
 #ifdef CONFIG_BPF_SYSCALL
 /**
@@ -5510,6 +5732,12 @@ int security_locked_down(enum lockdown_reason what)
 	return call_int_hook(locked_down, 0, what);
 }
 EXPORT_SYMBOL(security_locked_down);
+
+int security_lock_kernel_down(const char *where, enum lockdown_reason level)
+{
+	return call_int_hook(lock_kernel_down, 0, where, level);
+}
+EXPORT_SYMBOL(security_lock_kernel_down);
 
 #ifdef CONFIG_PERF_EVENTS
 /**

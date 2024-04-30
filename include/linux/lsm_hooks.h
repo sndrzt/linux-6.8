@@ -47,12 +47,14 @@ struct security_hook_heads {
  * struct lsm_id - Identify a Linux Security Module.
  * @lsm: name of the LSM, must be approved by the LSM maintainers
  * @id: LSM ID number from uapi/linux/lsm.h
+ * @lsmblob: indicates the LSM has an entry in struct lsmblob
  *
  * Contains the information that identifies the LSM.
  */
 struct lsm_id {
 	const char	*name;
 	u64		id;
+	bool		lsmblob;
 };
 
 /*
@@ -73,11 +75,16 @@ struct lsm_blob_sizes {
 	int	lbs_cred;
 	int	lbs_file;
 	int	lbs_inode;
+	int	lbs_sock;
 	int	lbs_superblock;
 	int	lbs_ipc;
+	int	lbs_key;
 	int	lbs_msg_msg;
 	int	lbs_task;
 	int	lbs_xattr_count; /* number of xattr slots in new_xattrs array */
+	int	lbs_mnt_opts;
+	bool	lbs_secmark;	/* expressed desire for secmark use */
+	bool	lbs_netlabel;	/* expressed desire for netlabel use */
 };
 
 /**
@@ -151,5 +158,6 @@ extern struct lsm_info __start_early_lsm_info[], __end_early_lsm_info[];
 		__aligned(sizeof(unsigned long))
 
 extern int lsm_inode_alloc(struct inode *inode);
+extern void *lsm_mnt_opts_alloc(gfp_t priority);
 
 #endif /* ! __LINUX_LSM_HOOKS_H */
